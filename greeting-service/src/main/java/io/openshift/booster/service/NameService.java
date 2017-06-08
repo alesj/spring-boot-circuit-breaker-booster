@@ -16,28 +16,36 @@
 
 package io.openshift.booster.service;
 
-import com.netflix.hystrix.HystrixCircuitBreaker;
-import com.netflix.hystrix.HystrixCommandKey;
-import com.netflix.hystrix.contrib.javanica.annotation.HystrixCommand;
-import com.netflix.hystrix.contrib.javanica.annotation.HystrixProperty;
+import java.time.Duration;
+
+import com.nike.fastbreak.CircuitBreaker;
+import com.nike.fastbreak.CircuitBreakerImpl;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 /**
- * Service invoking name-service via REST and guarded by Hystrix.
+ * Service invoking name-service via REST and guarded by Fastbreak.
  */
 @Service
 public class NameService {
 
-    private static final HystrixCommandKey KEY = HystrixCommandKey.Factory.asKey("NameService");
-
     private final String nameHost = System.getProperty("name.host", "http://springboot-cb-name");
     private final RestTemplate restTemplate = new RestTemplate();
+    private volatile CircuitBreakerState state = CircuitBreakerState.CLOSED;
 
-    @HystrixCommand(commandKey = "NameService", fallbackMethod = "getFallbackName", commandProperties = {
-            @HystrixProperty(name = "execution.isolation.thread.timeoutInMilliseconds", value = "1000")
-    })
-    public String getName() {
+    private CircuitBreaker<String> nameCircuitBreaker = CircuitBreakerImpl.<String>newBuilder()
+        .withMaxConsecutiveFailuresAllowed(20)
+        .withCallTimeout(Duration.ofMillis(1000))
+        .withId("NameService")
+        .build()
+        .onOpen(() -> state = CircuitBreakerState.OPEN)
+        .onClose(() -> state = CircuitBreakerState.CLOSED);
+
+    public String getName() throws Exception {
+        return nameCircuitBreaker.executeBlockingCall(this::getNameInternal);
+    }
+
+    private String getNameInternal() {
         return restTemplate.getForObject(nameHost + "/api/name", String.class);
     }
 
@@ -46,7 +54,6 @@ public class NameService {
     }
 
     CircuitBreakerState getState() throws Exception {
-        HystrixCircuitBreaker circuitBreaker = HystrixCircuitBreaker.Factory.getInstance(KEY);
-        return circuitBreaker != null && circuitBreaker.isOpen() ? CircuitBreakerState.OPEN : CircuitBreakerState.CLOSED;
+        return state;
     }
 }
